@@ -1,250 +1,404 @@
 import os
 import numpy as np
 import matplotlib.pyplot as plt
+import random
 import openai
+from concurrent.futures import ProcessPoolExecutor
+from deap import base, creator, tools, algorithms
 
-# Set your OpenAI API key
-openai.api_key = os.getenv('OPENAI_API_KEY')  # Make sure to set this environment variable securely
+# Configurar a API do OpenAI (opcional – defina a variável de ambiente OPENAI_API_KEY)
+openai.api_key = os.getenv('OPENAI_API_KEY')
+
+
+###############################
+# Funções Auxiliares Gerais
+###############################
 
 def normalize(vector):
-    """
-    Normaliza um vetor para que sua norma seja 1.
-    """
+    """Normaliza um vetor para que sua norma seja 1."""
     norm = np.linalg.norm(vector)
     if norm == 0:
         raise ValueError("A função de onda não pode ser o vetor nulo.")
     return vector / norm
 
+
 def is_hermitian(matrix):
-    """
-    Verifica se uma matriz é Hermitiana, ou seja, se ela é igual à sua transposta conjugada.
-    """
+    """Verifica se uma matriz é Hermitiana (igual à sua transposta conjugada)."""
     return np.allclose(matrix, matrix.conj().T)
 
+
 def make_hermitian(matrix):
-    """
-    Ajusta uma matriz para que seja Hermitiana, tomando a média entre a matriz e sua transposta conjugada.
-    """
+    """Força a hermiticidade ajustando a matriz: (M + M†)/2."""
     return (matrix + matrix.conj().T) / 2
 
-def get_operator_chatgpt(num_states, factor_name, states):
+
+###############################
+# Funções para Geração Automática de Operadores
+###############################
+
+def get_operator_chatgpt(num_states, factor_name, states, factor_database):
     """
-    Usa a OpenAI ChatGPT API para gerar automaticamente o operador para um fator.
-
-    Parâmetros:
-    - num_states: número de estados de decisão.
-    - factor_name: nome do fator.
-    - states: lista com os nomes dos estados.
-
-    Retorna:
-    - operator: matriz Hermitiana representando o operador do fator.
+    Gera automaticamente o operador para um fator usando a API do ChatGPT.
+    Se a API não estiver disponível ou o fator não estiver no banco de dados,
+    utiliza valores padrão ou gera valores aleatórios.
+    O operador é construído como uma matriz diagonal.
     """
-    print(f"\nGerando operador para o fator '{factor_name}' usando ChatGPT.")
+    print(f"\nGerando operador para o fator '{factor_name}' automaticamente.")
 
-    # Preparar o prompt para a API
-    prompt = f"Para cada um dos seguintes estados de decisão, atribua um valor numérico de 1 a 10 para o fator '{factor_name}'.\n"
-    for idx, state in enumerate(states):
-        prompt += f"{idx + 1}. {state}\n"
-
-    prompt += "\nForneça os valores no formato:\nEstado 1: valor1\nEstado 2: valor2\n..."
-
-    try:
-        # Chamar a API do OpenAI
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",  # Use o modelo desejado
-            messages=[
-                {"role": "system", "content": "Você é um assistente que atribui valores numéricos a estados de decisão com base em fatores específicos."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=150,
-            n=1,
-            stop=None,
-            temperature=0.7,
-        )
-
-        # Extrair a resposta
-        chatgpt_reply = response.choices[0].message.content.strip()
-
-        # Processar a resposta para extrair os valores
-        factor_values = {}
-        for line in chatgpt_reply.split('\n'):
-            parts = line.strip().split(':')
-            if len(parts) == 2:
-                state_info, value = parts
-                value = value.strip()
-                # Extrair o número do estado
-                state_num = int(''.join(filter(str.isdigit, state_info)))
-                # Mapear para o nome do estado
-                state_name = states[state_num - 1]
-                factor_values[state_name] = float(value)
+    if openai.api_key and (factor_name.lower() in factor_database):
+        prompt = f"Para os estados de decisão: {', '.join(states)}, atribua um valor numérico de 1 a 10 para o fator '{factor_name}'. " \
+                 f"Retorne os valores no formato: Estado 1: <valor1>, Estado 2: <valor2>."
+        try:
+            response = openai.ChatCompletion.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role": "system",
+                     "content": "Você é um assistente que atribui valores numéricos de forma objetiva."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=60,
+                temperature=0.5,
+            )
+            reply = response.choices[0].message.content.strip()
+            factor_values = {}
+            for part in reply.split(','):
+                if ':' in part:
+                    state_label, value_str = part.split(':')
+                    try:
+                        num = int(''.join(filter(str.isdigit, state_label)))
+                    except ValueError:
+                        continue
+                    state_name = states[num - 1] if num - 1 < len(states) else f"Estado{num}"
+                    factor_values[state_name] = float(value_str.strip())
+            if factor_values:
+                print(f"Valores gerados para '{factor_name}': {factor_values}")
             else:
-                continue  # Linha não reconhecida, pode ser ignorada
+                raise Exception("Resposta não interpretada.")
+        except Exception as e:
+            print(f"Erro com ChatGPT: {e}")
+            factor_values = None
+    else:
+        factor_values = None
 
-        # Construção do operador
-        operator = np.zeros((num_states, num_states), dtype=complex)
-        for i in range(num_states):
-            state = states[i]
-            value = factor_values.get(state, 5.0)  # Valor padrão se não encontrado
-            operator[i, i] = value
+    if not factor_values:
+        if factor_name.lower() in factor_database:
+            factor_values = factor_database[factor_name.lower()]
+            print(f"Usando valores padrão do banco de dados para '{factor_name}': {factor_values}")
+        else:
+            factor_values = {state: random.uniform(1, 10) for state in states}
+            print(f"Fator '{factor_name}' não encontrado. Usando valores aleatórios: {factor_values}")
 
-        # Garantir que o operador seja Hermitiano
-        if not is_hermitian(operator):
-            operator = make_hermitian(operator)
+    # Construir o operador como uma matriz diagonal
+    operator = np.zeros((num_states, num_states), dtype=complex)
+    for i in range(num_states):
+        state = states[i]
+        value = factor_values.get(state, random.uniform(1, 10))
+        operator[i, i] = value
+    if not is_hermitian(operator):
+        operator = make_hermitian(operator)
+    return operator
 
-        return operator
-
-    except Exception as e:
-        print(f"Erro ao gerar valores com ChatGPT: {e}")
-        print("Usando valores padrão para o fator.")
-        # Em caso de erro, usar valores padrão
-        operator = np.identity(num_states) * 5.0
-        return operator
 
 def calculate_uncertainty(psi, operator):
     """
     Calcula o valor esperado e a incerteza (desvio padrão) de um operador dado o estado psi.
-
-    Parâmetros:
-    - psi: vetor de estado (função de onda normalizada).
-    - operator: matriz representando o operador.
-
-    Retorna:
-    - expected_value: valor esperado do operador.
-    - uncertainty: incerteza (desvio padrão) do operador.
+    Usa: σ = sqrt(<psi|F^2|psi> - (<psi|F|psi>)^2)
     """
-    # Valor esperado: <psi|operator|psi>
     expected_value = np.vdot(psi, operator @ psi).real
-    # Valor esperado do quadrado do operador: <psi|operator^2|psi>
     expected_value_squared = np.vdot(psi, operator @ operator @ psi).real
-    # Variância: sigma^2 = <operator^2> - <operator>^2
     variance = expected_value_squared - expected_value ** 2
-    # Incerteza: sigma = sqrt(variância)
     uncertainty = np.sqrt(max(variance, 0))
     return expected_value, uncertainty
 
+
+###############################
+# Funções para Questionário Moral (Baseado no MFQ)
+###############################
+
+def get_moral_profile():
+    """
+    Aplica um breve questionário baseado no MFQ para captar o perfil moral do usuário.
+    Retorna um dicionário com as pontuações dos fundamentos.
+    """
+    print("\nResponda as seguintes perguntas (escala de 1 a 10):")
+    questions = {
+        "harm": "Quão importante é evitar causar danos aos outros?",
+        "fairness": "Quão importante é tratar todos de forma justa?",
+        "loyalty": "Quão importante é manter a lealdade ao seu grupo?",
+        "authority": "Quão importante é respeitar as autoridades e regras?",
+        "purity": "Quão importante é manter a pureza moral e os valores tradicionais?"
+    }
+    profile = {}
+    for key, question in questions.items():
+        while True:
+            try:
+                response = float(input(f"{question} "))
+                if response < 1 or response > 10:
+                    print("Por favor, insira um número entre 1 e 10.")
+                    continue
+                profile[key] = response
+                break
+            except ValueError:
+                print("Entrada inválida. Tente novamente.")
+    return profile
+
+
+def adjust_weights_by_profile(base_weights, moral_profile, factor_to_moral):
+    """
+    Ajusta os pesos dos fatores com base no perfil moral do usuário.
+    base_weights: dicionário com os pesos base.
+    moral_profile: dicionário com as pontuações dos fundamentos morais.
+    factor_to_moral: mapeamento de cada fator para uma lista de fundamentos relevantes.
+    Retorna os pesos ajustados (normalizados para soma 1).
+    """
+    adjusted_weights = {}
+    for factor in base_weights:
+        if factor.lower() in factor_to_moral:
+            morals = factor_to_moral[factor.lower()]
+            score = np.mean([moral_profile.get(m, 5) for m in morals])
+        else:
+            score = 5  # neutro
+        # Mapeia score de [1,10] para ajuste de [0.5, 1.5]
+        adjustment = 0.5 + (score - 1) * (1.0 / 9)
+        adjusted_weights[factor] = base_weights[factor] * adjustment
+    total = sum(adjusted_weights.values())
+    for factor in adjusted_weights:
+        adjusted_weights[factor] /= total
+    return adjusted_weights
+
+
+###############################
+# Funções para Simulação Monte Carlo Paralela
+###############################
+
+def simulate_single(psi, operators, weights, k_value, interactions, uncertainties):
+    """
+    Executa uma única simulação Monte Carlo para calcular M(A).
+    Cada fator é amostrado de uma distribuição normal com média e desvio (incerteza).
+    """
+    M_A_sim = 0.0
+    for factor in operators:
+        exp_val, uncert = calculate_uncertainty(psi, operators[factor])
+        sampled_val = np.random.normal(exp_val, uncert)
+        M_A_sim += weights[factor] * sampled_val
+    penalty = k_value * sum([weights[factor] * uncertainties[factor] for factor in operators])
+    M_A_sim -= penalty
+    for inter in interactions.values():
+        M_A_sim += inter['theta'] * inter['expected_product']
+    return M_A_sim
+
+
+def monte_carlo_consensus_parallel(psi, operators, weights, k_value, interactions, uncertainties, num_simulations=1000):
+    """
+    Executa simulações Monte Carlo em paralelo para calcular o consenso final de M(A).
+    Retorna:
+      - consensus: média dos valores simulados.
+      - probability: fração das simulações em que M(A) > 0.
+      - results: array com os valores simulados.
+    """
+    with ProcessPoolExecutor() as executor:
+        futures = [executor.submit(simulate_single, psi, operators, weights, k_value, interactions, uncertainties)
+                   for _ in range(num_simulations)]
+        results = np.array([future.result() for future in futures])
+    consensus = np.mean(results)
+    probability = np.sum(results > 0) / num_simulations
+    return consensus, probability, results
+
+
+###############################
+# Função de Otimização Evolutiva (opcional, usando DEAP)
+###############################
+
+def genetic_optimization(psi, operators, base_weights, k_value, interactions, uncertainties, num_simulations=500,
+                         num_generations=20, pop_size=50):
+    """
+    Otimiza os ajustes (multiplicadores) para os pesos dos fatores usando um algoritmo genético.
+    Retorna o melhor vetor de ajustes e seu fitness (a probabilidade de M(A) > 0).
+    """
+    num_factors = len(operators)
+    creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+    creator.create("Individual", list, fitness=creator.FitnessMax)
+
+    toolbox = base.Toolbox()
+    # Cada gene (ajuste) varia entre 0.5 e 1.5
+    toolbox.register("attr_float", random.uniform, 0.5, 1.5)
+    toolbox.register("individual", tools.initRepeat, creator.Individual, toolbox.attr_float, n=num_factors)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+
+    def eval_individual(individual):
+        # Calcular pesos ajustados: w_eff = base_weight * ajuste, normalizados
+        factor_list = list(operators.keys())
+        raw_weights = np.array([base_weights[f] for f in factor_list])
+        adjustments = np.array(individual)
+        new_weights = raw_weights * adjustments
+        new_weights /= new_weights.sum()
+        adjusted_weights = {factor_list[i]: new_weights[i] for i in range(len(factor_list))}
+        consensus, probability, _ = monte_carlo_consensus_parallel(psi, operators, adjusted_weights, k_value,
+                                                                   interactions, uncertainties, num_simulations)
+        return (probability,)
+
+    toolbox.register("evaluate", eval_individual)
+    toolbox.register("mate", tools.cxBlend, alpha=0.5)
+    toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=0.1, indpb=0.2)
+    toolbox.register("select", tools.selTournament, tournsize=3)
+
+    population = toolbox.population(n=pop_size)
+    NGEN = num_generations
+    for gen in range(NGEN):
+        offspring = algorithms.varAnd(population, toolbox, cxpb=0.5, mutpb=0.2)
+        fits = list(map(toolbox.evaluate, offspring))
+        for fit, ind in zip(fits, offspring):
+            ind.fitness.values = fit
+        population = toolbox.select(offspring, k=len(offspring))
+        best = tools.selBest(population, 1)[0]
+        print(f"Geração {gen + 1}: Melhor fitness = {best.fitness.values[0]:.4f}")
+    best = tools.selBest(population, 1)[0]
+    return best, best.fitness.values[0]
+
+
+###############################
+# Função Principal com Feedback Iterativo
+###############################
+
 def main():
-    print("Bem-vindo ao Algoritmo de Tomada de Decisão com Mérito Moral Total!\n")
+    print("Bem-vindo ao Sistema Híbrido de Tomada de Decisão com Otimização Evolutiva e Paralelismo!\n")
 
-    # Verificar se a API key está definida
-    if not openai.api_key:
-        print("Erro: A chave da API OpenAI não está definida. Por favor, defina a variável de ambiente 'OPENAI_API_KEY'.")
-        return
+    # Entrada dos estados de decisão (em uma única linha, separados por vírgulas)
+    states_input = input("Digite os estados de decisão (separados por vírgula): ")
+    states = [s.strip() for s in states_input.split(',') if s.strip()]
+    num_states = len(states)
+    if num_states == 0:
+        raise ValueError("Nenhum estado informado.")
 
-    # Entrada dos estados de decisão
-    num_states = int(input("Digite o número de estados de decisão: "))
-    states = []
-    for i in range(num_states):
-        state_name = input(f"Digite o nome do estado {i+1}: ")
-        states.append(state_name)
-
-    # Entrada das amplitudes iniciais
-    psi = np.zeros(num_states, dtype=complex)
-    equal_amplitudes = input("\nDeseja usar amplitudes iguais para todos os estados? (s/n): ").strip().lower()
-    if equal_amplitudes == 's':
-        # Usa amplitudes iguais para reduzir viés
-        psi[:] = 1
-    else:
-        # Solicita as amplitudes do usuário
-        print("Digite as amplitudes iniciais (números complexos) para cada estado:")
-        for idx, state in enumerate(states):
-            amp = complex(input(f"Amplitude para o estado '{state}' (formato a+bj): "))
-            psi[idx] = amp
-
-    # Normalizar a função de onda
+    # Definir amplitudes iguais para reduzir viés
+    psi = np.ones(num_states, dtype=complex)
     psi = normalize(psi)
 
-    # Definição dos operadores dos fatores
-    num_factors = int(input("\nDigite o número de fatores a serem considerados: "))
-    operators = {}          # Dicionário para armazenar os operadores
-    expected_values = {}    # Dicionário para armazenar os valores esperados
-    uncertainties = {}      # Dicionário para armazenar as incertezas
+    # Obter o perfil moral do usuário (questionário baseado no MFQ)
+    moral_profile = get_moral_profile()
+    print("\nSeu perfil moral:")
+    for key, val in moral_profile.items():
+        print(f"{key}: {val}")
 
-    for i in range(num_factors):
-        factor_name = input(f"\nDigite o nome do fator {i+1}: ")
-        operator = get_operator_chatgpt(num_states, factor_name, states)
-        # Calcular o valor esperado e a incerteza para o fator
-        expected_value, uncertainty = calculate_uncertainty(psi, operator)
-        operators[factor_name] = operator
-        expected_values[factor_name] = expected_value
-        uncertainties[factor_name] = uncertainty
+    # Entrada dos fatores (em uma única linha, separados por vírgula)
+    factors_input = input("Digite os nomes dos fatores (separados por vírgula): ")
+    factor_names = [s.strip() for s in factors_input.split(',') if s.strip()]
+    num_factors = len(factor_names)
+    if num_factors == 0:
+        raise ValueError("Nenhum fator informado.")
 
-    # Cálculo dos pesos inversamente proporcionais às variâncias
-    variances = {k: uncertainties[k]**2 for k in uncertainties}
-    total_inverse_variance = sum([1/v if v > 0 else 0 for v in variances.values()])
-    weights = {}
+    # Mapeamento entre fatores e fundamentos morais para ajuste de pesos
+    factor_to_moral = {
+        "descanso": ["harm"],
+        "produtividade": ["fairness"],
+        "saúde": ["harm", "purity"],
+        "bemestarsocial": ["loyalty", "authority"]
+    }
+
+    # Banco de dados interno de valores padrão para alguns fatores
+    factor_database = {
+        "descanso": {"Dormir Agora": 3, "Dormir Mais Tarde": 5},
+        "produtividade": {"Dormir Agora": 2, "Dormir Mais Tarde": 4},
+        "saúde": {"Dormir Agora": 4, "Dormir Mais Tarde": 6},
+        "bemestarsocial": {"Dormir Agora": 1, "Dormir Mais Tarde": 3},
+        "custo": {"Mudar de casa": 6, "Reformar a casa" :4},
+        "conforto":{"Mudar de casa": 8, "Reformar a casa" :6},
+        "localizacao": {"Mudar de casa": 9, "Reformar a casa": 5}
+    }
+
+    # Gerar operadores automaticamente para cada fator
+    operators = {}
+    expected_values = {}
+    uncertainties = {}
+    for factor_name in factor_names:
+        op = get_operator_chatgpt(num_states, factor_name, states, factor_database)
+        exp_val, uncert = calculate_uncertainty(psi, op)
+        operators[factor_name] = op
+        expected_values[factor_name] = exp_val
+        uncertainties[factor_name] = uncert
+
+    # Cálculo dos pesos base inversamente proporcionais às variâncias
+    variances = {k: uncertainties[k] ** 2 for k in uncertainties}
+    total_inverse_variance = sum([1 / v if v > 0 else 0 for v in variances.values()])
+    base_weights = {}
     for k in variances:
-        if variances[k] > 0:
-            weights[k] = (1 / variances[k]) / total_inverse_variance
-        else:
-            weights[k] = 0  # Se a variância é zero, o peso é zero
-    # Normalizar os pesos para que a soma seja 1
-    weight_sum = sum(weights.values())
-    if weight_sum == 0:
+        base_weights[k] = (1 / variances[k]) / total_inverse_variance if variances[k] > 0 else 0
+    total_weight = sum(base_weights.values())
+    if total_weight == 0:
         raise ValueError("A soma dos pesos é zero. Verifique as variâncias dos fatores.")
-    for k in weights:
-        weights[k] /= weight_sum
+    for k in base_weights:
+        base_weights[k] /= total_weight
 
-    # Exibir os pesos calculados
-    print("\nPesos dos fatores (calculados inversamente às variâncias):")
-    for k in weights:
-        print(f"Fator '{k}': Peso = {weights[k]:.4f}")
+    print("\nPesos base dos fatores (calculados inversamente às variâncias):")
+    for k in base_weights:
+        print(f"Fator '{k}': Peso base = {base_weights[k]:.4f}")
 
-    # Valor de k (nível de confiança)
-    k_value = float(input("\nDigite o valor da constante k (nível de confiança, ex.: 1 para 68%, 2 para 95%): "))
+    # Ajuste dos pesos com base no perfil moral do usuário
+    adjusted_weights = adjust_weights_by_profile(base_weights, moral_profile, factor_to_moral)
+    print("\nPesos ajustados com base no seu perfil moral:")
+    for k in adjusted_weights:
+        print(f"Fator '{k}': Peso ajustado = {adjusted_weights[k]:.4f}")
 
-    # Definição das interações entre fatores
+    # Definir valor de k (nível de confiança) fixo para simplificar
+    k_value = 1  # Ex: 1 para 68% de confiança
+
+    # Não definimos interações manualmente nesta versão para simplificar
     interactions = {}
-    response = input("\nDeseja definir interações entre os fatores? (s/n): ").strip().lower()
-    if response == 's':
-        num_interactions = int(input("Digite o número de interações: "))
-        for _ in range(num_interactions):
-            factor_i = input("Digite o nome do primeiro fator da interação: ")
-            factor_j = input("Digite o nome do segundo fator da interação: ")
-            theta = float(input(f"Digite o coeficiente de interação (theta) entre '{factor_i}' e '{factor_j}': "))
-            # Calcular o valor esperado do produto dos operadores: <psi|F_i F_j|psi>
-            product_operator = operators[factor_i] @ operators[factor_j]
-            expected_product = np.vdot(psi, product_operator @ psi).real
-            interactions[(factor_i, factor_j)] = {
-                'theta': theta,
-                'expected_product': expected_product
-            }
-    else:
-        print("Nenhuma interação definida.")
 
-    # Cálculo do Mérito Moral Total M(A)
-    M_A = 0.0
+    # Executar simulações Monte Carlo em paralelo para obter consenso e probabilidade
+    num_simulations = int(input("\nDigite o número de simulações Monte Carlo (ex.: 1000): "))
+    consensus, probability, simulation_results = monte_carlo_consensus_parallel(psi, operators, adjusted_weights,
+                                                                                k_value, interactions, uncertainties,
+                                                                                num_simulations)
 
-    # Primeiro termo: Soma ponderada dos valores esperados
-    first_term = sum([weights[factor] * expected_values[factor] for factor in operators])
-    M_A += first_term
+    print(f"\nResultado do Consenso Monte Carlo:")
+    print(f"Consenso M(A): {consensus:.4f}")
+    print(f"Probabilidade de decisão favorável (M(A) > 0): {probability * 100:.2f}%")
 
-    # Segundo termo: Subtração das incertezas ponderadas
-    second_term = k_value * sum([weights[factor] * uncertainties[factor] for factor in operators])
-    M_A -= second_term
-
-    # Terceiro termo: Soma das interações
-    third_term = 0.0
-    for interaction in interactions.values():
-        third_term += interaction['theta'] * interaction['expected_product']
-    M_A += third_term
-
-    # Exibição dos resultados
-    print(f"\nO Mérito Moral Total (M(A)) é: {M_A:.4f}")
+    # Exibir os estados, amplitudes e probabilidades
+    probabilities = np.abs(psi) ** 2
     print("\nEstados, amplitudes e probabilidades:")
-    probabilities = np.abs(psi)**2
     for idx, state in enumerate(states):
-        amp = psi[idx]
-        prob = probabilities[idx]
-        print(f"Estado '{state}': Amplitude = {amp}, Probabilidade = {prob:.4f}")
+        print(f"Estado '{state}': Amplitude = {psi[idx]}, Probabilidade = {probabilities[idx]:.4f}")
 
-    # Decisão recomendada com base nas probabilidades
     idx_max = np.argmax(probabilities)
     recommended_state = states[idx_max]
     print(f"\nDecisão Recomendada: Estado '{recommended_state}' com probabilidade {probabilities[idx_max]:.4f}")
 
-    # Visualizações gráficas
+    # Otimização Evolutiva para ajustar multiplicadores dos pesos (opcional)
+    use_evolution = input("\nDeseja executar otimização evolutiva para ajustar os pesos? (s/n): ").strip().lower()
+    if use_evolution == 's':
+        best_adjustments, best_fitness = genetic_optimization(psi, operators, base_weights, k_value, interactions,
+                                                              uncertainties, num_simulations=500, num_generations=20,
+                                                              pop_size=50)
+        print(f"\nMelhor vetor de ajustes encontrado: {best_adjustments}")
+        print(f"Melhor fitness (probabilidade favorável): {best_fitness * 100:.2f}%")
+        # Aplicar os ajustes aos pesos base
+        factor_list = list(operators.keys())
+        raw_weights = np.array([base_weights[f] for f in factor_list])
+        best_adjustments = np.array(best_adjustments)
+        new_weights = raw_weights * best_adjustments
+        new_weights /= new_weights.sum()
+        adjusted_weights = {factor_list[i]: new_weights[i] for i in range(len(factor_list))}
+        print("\nPesos ajustados após otimização evolutiva:")
+        for factor in adjusted_weights:
+            print(f"Fator '{factor}': Peso ajustado = {adjusted_weights[factor]:.4f}")
+        # Reexecuta Monte Carlo com os novos pesos
+        consensus, probability, simulation_results = monte_carlo_consensus_parallel(psi, operators, adjusted_weights,
+                                                                                    k_value, interactions,
+                                                                                    uncertainties, num_simulations)
+        print(f"\nNovo Consenso M(A): {consensus:.4f}")
+        print(f"Nova Probabilidade de decisão favorável (M(A) > 0): {probability * 100:.2f}%")
 
-    # Gráfico de probabilidades dos estados
+    # Visualizações Gráficas
+    plt.figure(figsize=(10, 6))
+    plt.hist(simulation_results, bins=30, color='violet', edgecolor='black')
+    plt.title('Distribuição dos Valores de Mérito Moral Total M(A)')
+    plt.xlabel('M(A)')
+    plt.ylabel('Frequência')
+    plt.grid(axis='y')
+    plt.show()
+
     plt.figure(figsize=(8, 6))
     plt.bar(states, probabilities, color='skyblue')
     plt.title('Probabilidades dos Estados')
@@ -253,25 +407,38 @@ def main():
     plt.grid(axis='y')
     plt.show()
 
-    # Gráfico de valores esperados e incertezas
-    factors = list(operators.keys())
-    exp_vals = [expected_values[factor] for factor in factors]
-    uncertainties_vals = [uncertainties[factor] for factor in factors]
-
-    x = np.arange(len(factors))
-    width = 0.35  # Largura das barras
-
+    factor_list = list(operators.keys())
+    exp_vals = [expected_values[f] for f in factor_list]
+    uncert_vals = [uncertainties[f] for f in factor_list]
+    x = np.arange(len(factor_list))
+    width = 0.35
     fig, ax = plt.subplots(figsize=(10, 6))
-    rects1 = ax.bar(x - width/2, exp_vals, width, label='Valor Esperado', color='green')
-    rects2 = ax.bar(x + width/2, uncertainties_vals, width, label='Incerteza', color='orange')
-
+    ax.bar(x - width / 2, exp_vals, width, label='Valor Esperado', color='green')
+    ax.bar(x + width / 2, uncert_vals, width, label='Incerteza', color='orange')
     ax.set_ylabel('Valores')
     ax.set_title('Valores Esperados e Incertezas dos Fatores')
     ax.set_xticks(x)
-    ax.set_xticklabels(factors)
+    ax.set_xticklabels(factor_list)
     ax.legend()
     plt.grid(axis='y')
     plt.show()
+
+    # Feedback Iterativo: permitir ajustes e nova simulação
+    while True:
+        feedback = input(
+            "\nDeseja ajustar parâmetros (ex.: valor de k ou número de simulações) e reexecutar? (s/n): ").strip().lower()
+        if feedback == 's':
+            k_value = float(input("Digite o novo valor de k (nível de confiança): "))
+            num_simulations = int(input("Digite o novo número de simulações Monte Carlo: "))
+            consensus, probability, simulation_results = monte_carlo_consensus_parallel(psi, operators,
+                                                                                        adjusted_weights, k_value,
+                                                                                        interactions, uncertainties,
+                                                                                        num_simulations)
+            print(f"\nNovo Consenso M(A): {consensus:.4f}")
+            print(f"Nova Probabilidade de decisão favorável (M(A) > 0): {probability * 100:.2f}%")
+        else:
+            break
+
 
 if __name__ == "__main__":
     main()
