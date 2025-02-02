@@ -1,11 +1,11 @@
 
-# Moral Foundations Decision Engine (MFDE) - Experimental
+# Logic Decision Engine (LDG) - Experimental
 
-**Moral Foundations Decision Engine (MFDE)** é um sistema híbrido de apoio à decisão que integra fundamentos éticos e morais com técnicas avançadas de simulação e otimização. Este projeto é um modelo experimental e visa explorar a personalização e automação na tomada de decisões com base em perfis morais, utilizando dados simulados e técnicas de aprendizado híbrido.
+**Logic Decision Engine (LDG)** é um sistema híbrido de apoio à decisão que integra fundamentos éticos e morais com técnicas avançadas de simulação e otimização. Este projeto é um modelo experimental e visa explorar a personalização e automação na tomada de decisões com base em perfis morais, utilizando dados simulados e técnicas de aprendizado híbrido.
 
 ## Visão Geral
 
-O MFDE utiliza:
+O LDG utiliza:
 - **Questionário Moral**: Um breve questionário inspirado no *Moral Foundations Questionnaire (MFQ)* para capturar o perfil ético/moral do usuário.
 - **Geração Automática de Operadores**: Operadores de decisão são gerados automaticamente com base nos nomes dos fatores. São utilizados valores padrão a partir de um banco de dados interno e, quando possível, a API do ChatGPT.
 - **Cálculo Automático de Incertezas**: Estima valores esperados e desvios padrão (incertezas) dos operadores com base na função de onda.
@@ -42,7 +42,7 @@ Os resultados e parâmetros gerados por este sistema são baseados em simulaçõ
 pip install numpy matplotlib openai deap
 ```
 
-### Configuração da API do OpenAI (opcional)
+### Configuração da API do OpenAI ou DeepSeek (opcional)
 
 Defina sua chave de API do OpenAI na variável de ambiente `OPENAI_API_KEY`:
 
